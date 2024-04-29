@@ -1,10 +1,12 @@
-const fs = require('fs');
-const https = require('https');
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const cookiePaser = require('cookie-parser');
+const { base64url } = require('./helpers');
 const app = express();
 const port = 3000;
+const jwtSecret =
+  'NeH0OXbCJUO3cJnreKZvNKM618fpiFt4G4DsDZOnq3VVXO4eMZTx6DzlX0PtlHyrgE9ULt6YWq3kjqqu5d2udzE0kvNLAtkwxp+XY1JTa/MmTDB0AeeNxd5vbqiV7IMUluSGV92LHDUsGgVRQt5Mos/W62yqgOX7RPpxLQ6F3iFynxi/FyPXJ8F9qxDZ3/APMyjjPv04t5XOVwUNZuootj5E1uZNQiLLJvsIalAxwdGkVutdzVpk5WnBVR6/mimALJWfaRCQ6Z9vUNewMvbuwVt9bflDTJKZni+Ytei3/a/eOxDt0AHYQck5crPqkV4H+P+RHqAuIWOz/CW+6eJTNA==';
 
 app.use(express.urlencoded({ extended: true }));
 app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
@@ -50,40 +52,68 @@ app.post('/api/auth/login', (req, res) => {
       message: 'Unauthorized',
     });
   }
-  const sessionId = Date.now().toString();
-  sessions[sessionId] = { sub: user.id };
-  return res
-    .setHeader(
-      'Set-Cookie',
-      `sessionId=${sessionId}; HttpOnly; Max-age=3600; SameSite=None; Secure; Partitioned`
-    )
-    .json(user);
+
+  const header = {
+    alg: 'HS256',
+    typ: 'JWT',
+  };
+
+  const payload = {
+    sub: user.id,
+    exp: Date.now() + 60 * 60 * 1000,
+  };
+
+  const encodedHeader = base64url(JSON.stringify(header));
+  const encodedPayload = base64url(JSON.stringify(payload));
+
+  const tokenData = `${encodedHeader}.${encodedPayload}`;
+
+  const hmac = crypto.createHmac('sha256', jwtSecret);
+  const signature = hmac.update(tokenData).digest('base64url');
+
+  return res.json({
+    token: `${tokenData}.${signature}`,
+  });
 });
 
 app.get('/api/auth/me', (req, res) => {
-  const session = sessions[req.cookies.sessionId];
-  if (!session) {
+  const token = req.headers.authorization.slice(7);
+  if (!token) {
     return res.status(401).json({
       message: 'Unauthorized',
     });
   }
-  const user = db.users.find((user) => user.id === session.sub);
+
+  const [encodedHeader, encodedPayload, tokenSignature] = token.split('.');
+
+  const tokenData = `${encodedHeader}.${encodedPayload}`;
+  const hmac = crypto.createHmac('sha256', jwtSecret);
+  const signature = hmac.update(tokenData).digest('base64url');
+
+  if (tokenSignature !== signature) {
+    return res.status(401).json({
+      message: 'Unauthorized',
+    });
+  }
+
+  const payload = JSON.parse(atob(encodedPayload));
+  const user = db.users.find((user) => user.id === payload.sub);
+
   if (!user) {
     return res.status(401).json({
       message: 'Unauthorized',
     });
   }
+
+  if (payload.exp < Date.now()) {
+    return res.status(401).json({
+      message: 'Unauthorized',
+    });
+  }
+
   return res.json(user);
 });
 
-https
-  .createServer(
-    {
-      key: fs.readFileSync('testcookie.com+2-key.pem'),
-      cert: fs.readFileSync('testcookie.com+2.pem'),
-    },
-    app
-  )
-  .listen(port, () => {
-    console.log(`App is listening on port ${port}`);
-  });
+app.listen(port, () => {
+  console.log(`App is listening on port ${port}`);
+});
